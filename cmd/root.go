@@ -3,15 +3,23 @@ package cmd
 import (
 	"fmt"
 	"os"
+	"strings"
 
+	"github.com/spf13/cobra"
+
+	"github.com/CircleCI-Public/circleci-cli/api/header"
+	"github.com/CircleCI-Public/circleci-cli/cmd/info"
+	"github.com/CircleCI-Public/circleci-cli/cmd/policy"
+	"github.com/CircleCI-Public/circleci-cli/cmd/runner"
 	"github.com/CircleCI-Public/circleci-cli/data"
 	"github.com/CircleCI-Public/circleci-cli/md_docs"
 	"github.com/CircleCI-Public/circleci-cli/settings"
-	"github.com/spf13/cobra"
+	"github.com/CircleCI-Public/circleci-cli/version"
 )
 
 var defaultEndpoint = "graphql-unstable"
 var defaultHost = "https://circleci.com"
+var defaultRestEndpoint = "api/v2"
 
 // rootCmd is used internally and global to the package but not exported
 // therefore we can use it in other commands, like `usage`
@@ -24,19 +32,32 @@ var rootOptions *settings.Config
 // rootTokenFromFlag stores the value passed in through the flag --token
 var rootTokenFromFlag string
 
-// PackageManager defines the package manager which was used to install the CLI.
-// You can override this value using -X flag to the compiler ldflags.
-var PackageManager = "source"
-
 // Execute adds all child commands to rootCmd and
 // sets flags appropriately. This function is called
 // by main.main(). It only needs to happen once to
 // the rootCmd.
 func Execute() {
+	header.SetCommandStr(CommandStr())
 	command := MakeCommands()
 	if err := command.Execute(); err != nil {
 		os.Exit(-1)
 	}
+}
+
+// Returns a string (e.g. "circleci context list") indicating what
+// subcommand is being called, without any args or flags,
+// for API headers.
+func CommandStr() string {
+	command := MakeCommands()
+	subCmd, _, err := command.Find(os.Args[1:])
+	if err != nil {
+		return "unknown"
+	}
+	parentNames := []string{subCmd.Name()}
+	subCmd.VisitParents(func(parent *cobra.Command) {
+		parentNames = append([]string{parent.Name()}, parentNames...)
+	})
+	return strings.Join(parentNames, " ")
 }
 
 func hasAnnotations(cmd *cobra.Command) bool {
@@ -72,22 +93,19 @@ Use "{{.CommandPath}} [command] --help" for more information about a command.{{e
 // MakeCommands creates the top level commands
 func MakeCommands() *cobra.Command {
 	rootOptions = &settings.Config{
-		Debug:     false,
-		Token:     "",
-		Host:      defaultHost,
-		Endpoint:  defaultEndpoint,
-		GitHubAPI: "https://api.github.com/",
+		Debug:        false,
+		Token:        "",
+		Host:         defaultHost,
+		RestEndpoint: defaultRestEndpoint,
+		Endpoint:     defaultEndpoint,
+		GitHubAPI:    "https://api.github.com/",
 	}
 
 	if err := rootOptions.Load(); err != nil {
 		panic(err)
 	}
 
-	loaded, err := data.LoadData()
-	if err != nil {
-		panic(err)
-	}
-	rootOptions.Data = loaded
+	rootOptions.Data = &data.Data
 
 	rootCmd = &cobra.Command{
 		Use:  "circleci",
@@ -104,52 +122,55 @@ func MakeCommands() *cobra.Command {
 	rootCmd.SetUsageTemplate(usageTemplate)
 	rootCmd.DisableAutoGenTag = true
 
-	rootCmd.AddCommand(newTestsCommand(rootOptions))
+	validator := func(_ *cobra.Command, _ []string) error {
+		return validateToken(rootOptions)
+	}
+
+	rootCmd.AddCommand(newOpenCommand())
+	rootCmd.AddCommand(newTestsCommand())
+	rootCmd.AddCommand(newContextCommand(rootOptions))
 	rootCmd.AddCommand(newQueryCommand(rootOptions))
 	rootCmd.AddCommand(newConfigCommand(rootOptions))
 	rootCmd.AddCommand(newOrbCommand(rootOptions))
+	rootCmd.AddCommand(runner.NewCommand(rootOptions, validator))
 	rootCmd.AddCommand(newLocalCommand(rootOptions))
 	rootCmd.AddCommand(newBuildCommand(rootOptions))
 	rootCmd.AddCommand(newVersionCommand(rootOptions))
 	rootCmd.AddCommand(newDiagnosticCommand(rootOptions))
 	rootCmd.AddCommand(newSetupCommand(rootOptions))
 
-	if isUpdateIncluded(PackageManager) {
+	rootCmd.AddCommand(followProjectCommand(rootOptions))
+	rootCmd.AddCommand(policy.NewCommand(rootOptions, validator))
+
+	if isUpdateIncluded(version.PackageManager()) {
 		rootCmd.AddCommand(newUpdateCommand(rootOptions))
 	} else {
 		rootCmd.AddCommand(newDisabledCommand(rootOptions, "update"))
 	}
 
 	rootCmd.AddCommand(newNamespaceCommand(rootOptions))
+	rootCmd.AddCommand(info.NewInfoCommand(rootOptions, validator))
 	rootCmd.AddCommand(newUsageCommand(rootOptions))
 	rootCmd.AddCommand(newStepCommand(rootOptions))
 	rootCmd.AddCommand(newSwitchCommand(rootOptions))
+	rootCmd.AddCommand(newAdminCommand(rootOptions))
+	rootCmd.AddCommand(newCompletionCommand())
 
-	rootCmd.PersistentFlags().BoolVar(&rootOptions.Debug,
-		"debug", rootOptions.Debug, "Enable debug logging.")
-	rootCmd.PersistentFlags().StringVar(&rootTokenFromFlag,
-		"token", "", "your token for using CircleCI, also CIRCLECI_CLI_TOKEN")
-	rootCmd.PersistentFlags().StringVar(&rootOptions.Host,
-		"host", rootOptions.Host, "URL to your CircleCI host, also CIRCLECI_CLI_HOST")
-	rootCmd.PersistentFlags().StringVar(&rootOptions.Endpoint,
-		"endpoint", rootOptions.Endpoint, "URI to your CircleCI GraphQL API endpoint")
+	flags := rootCmd.PersistentFlags()
 
-	rootCmd.PersistentFlags().StringVar(&rootOptions.GitHubAPI, "github-api", "https://api.github.com/", "Change the default endpoint to  GitHub API for retrieving updates")
-	if err := rootCmd.PersistentFlags().MarkHidden("github-api"); err != nil {
-		panic(err)
-	}
+	flags.BoolVar(&rootOptions.Debug, "debug", rootOptions.Debug, "Enable debug logging.")
+	flags.StringVar(&rootTokenFromFlag, "token", "", "your token for using CircleCI, also CIRCLECI_CLI_TOKEN")
+	flags.StringVar(&rootOptions.Host, "host", rootOptions.Host, "URL to your CircleCI host, also CIRCLECI_CLI_HOST")
+	flags.StringVar(&rootOptions.Endpoint, "endpoint", rootOptions.Endpoint, "URI to your CircleCI GraphQL API endpoint")
+	flags.StringVar(&rootOptions.GitHubAPI, "github-api", "https://api.github.com/", "Change the default endpoint to GitHub API for retrieving updates")
+	flags.BoolVar(&rootOptions.SkipUpdateCheck, "skip-update-check", skipUpdateByDefault(), "Skip the check for updates check run before every command.")
 
-	rootCmd.PersistentFlags().BoolVar(&rootOptions.SkipUpdateCheck, "skip-update-check", false, "Skip the check for updates check run before every command")
-	if err := rootCmd.PersistentFlags().MarkHidden("skip-update-check"); err != nil {
-		panic(err)
-	}
+	hidden := []string{"github-api", "debug", "endpoint"}
 
-	if err := rootCmd.PersistentFlags().MarkHidden("debug"); err != nil {
-		panic(err)
-	}
-
-	if err := rootCmd.PersistentFlags().MarkHidden("endpoint"); err != nil {
-		panic(err)
+	for _, f := range hidden {
+		if err := flags.MarkHidden(f); err != nil {
+			panic(err)
+		}
 	}
 
 	// Cobra has a peculiar default behaviour:
@@ -179,7 +200,14 @@ func prepare() {
 }
 
 func rootCmdPreRun(rootOptions *settings.Config) error {
-	return checkForUpdates(rootOptions)
+	// If an error occurs checking for updates, we should print the error but
+	// not break the CLI entirely.
+	err := checkForUpdates(rootOptions)
+	if err != nil {
+		fmt.Printf("Error checking for updates: %s\n", err)
+		fmt.Printf("Please contact support.\n\n")
+	}
+	return nil
 }
 
 func validateToken(rootOptions *settings.Config) error {
@@ -244,7 +272,7 @@ func visitAll(root *cobra.Command, fn func(*cobra.Command)) {
 
 func isUpdateIncluded(packageManager string) bool {
 	switch packageManager {
-	case "homebrew":
+	case "homebrew", "snap":
 		return false
 	default:
 		return true
@@ -264,4 +292,8 @@ This project is the seed for CircleCI's new command-line application.`
 	return fmt.Sprintf(`%s
 
 For more help, see the documentation here: %s`, long, config.Data.Links.CLIDocs)
+}
+
+func skipUpdateByDefault() bool {
+	return os.Getenv("CI") == "true" || os.Getenv("CIRCLECI_CLI_SKIP_UPDATE_CHECK") == "true"
 }

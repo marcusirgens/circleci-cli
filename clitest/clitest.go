@@ -9,12 +9,25 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 
-	"github.com/CircleCI-Public/circleci-cli/client"
+	"github.com/CircleCI-Public/circleci-cli/api/graphql"
+	"github.com/onsi/gomega/gexec"
 	"github.com/onsi/gomega/ghttp"
+	"github.com/onsi/gomega/types"
 
 	"github.com/onsi/gomega"
 )
+
+// On Unix, we want to assert that processed exited with 255
+// On Windows, it should be -1.
+func ShouldFail() types.GomegaMatcher {
+	failureCode := 255
+	if runtime.GOOS == "windows" {
+		failureCode = -1
+	}
+	return gexec.Exit(failureCode)
+}
 
 // TempSettings contains useful settings for testing the CLI
 type TempSettings struct {
@@ -22,6 +35,14 @@ type TempSettings struct {
 	TestServer *ghttp.Server
 	Config     *TmpFile
 	Update     *TmpFile
+}
+
+// Close should be called in an AfterEach and cleans up the temp directory and server process
+func (settings *TempSettings) Close() error {
+	settings.TestServer.Close()
+	settings.Config.Close()
+	settings.Update.Close()
+	return os.RemoveAll(settings.Home)
 }
 
 // AssertConfigRereadMatches re-opens the config file and checks it's contents against the given string
@@ -55,20 +76,9 @@ func WithTempSettings() *TempSettings {
 	return tempSettings
 }
 
-// Cleanup should be called in an AfterEach and cleans up the temp directory and server process
-func (tempSettings *TempSettings) Cleanup() {
-	defer func() {
-		tempSettings.TestServer.Close()
-		err := os.RemoveAll(tempSettings.Home)
-		if err != nil {
-			panic(err)
-		}
-	}()
-}
-
 // NewFakeClient returns a new *client.Client with the TestServer set and the provided endpoint, token.
-func (tempSettings *TempSettings) NewFakeClient(endpoint, token string) *client.Client {
-	return client.NewClient(tempSettings.TestServer.URL(), endpoint, token, false)
+func (tempSettings *TempSettings) NewFakeClient(endpoint, token string) *graphql.Client {
+	return graphql.NewClient(http.DefaultClient, tempSettings.TestServer.URL(), endpoint, token, false)
 }
 
 // MockRequestResponse is a helpful type for mocking HTTP handlers.
@@ -77,6 +87,30 @@ type MockRequestResponse struct {
 	Status        int
 	Response      string
 	ErrorResponse string
+}
+
+func (tempSettings *TempSettings) AppendRESTPostHandler(combineHandlers ...MockRequestResponse) {
+	for _, handler := range combineHandlers {
+		responseBody := handler.Response
+		if handler.ErrorResponse != "" {
+			responseBody = handler.ErrorResponse
+		}
+
+		tempSettings.TestServer.AppendHandlers(
+			ghttp.CombineHandlers(
+				ghttp.VerifyRequest("POST", "/api/v2/context"),
+				ghttp.VerifyContentType("application/json"),
+				func(w http.ResponseWriter, req *http.Request) {
+					body, err := ioutil.ReadAll(req.Body)
+					gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+					err = req.Body.Close()
+					gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+					gomega.Expect(handler.Request).Should(gomega.MatchJSON(body), "JSON Mismatch")
+				},
+				ghttp.RespondWith(handler.Status, responseBody),
+			),
+		)
+	}
 }
 
 // AppendPostHandler stubs out the provided MockRequestResponse.
@@ -101,7 +135,7 @@ func (tempSettings *TempSettings) AppendPostHandler(authToken string, combineHan
 						gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
 						err = req.Body.Close()
 						gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
-						gomega.Expect(body).Should(gomega.MatchJSON(handler.Request), "JSON Mismatch")
+						gomega.Expect(handler.Request).Should(gomega.MatchJSON(body), "JSON Mismatch")
 					},
 					ghttp.RespondWith(handler.Status, responseBody),
 				),
@@ -136,6 +170,10 @@ type TmpFile struct {
 	RootDir string
 	Path    string
 	File    *os.File
+}
+
+func (tempFile *TmpFile) Close() error {
+	return tempFile.File.Close()
 }
 
 // Write will write the given contents to the file on disk and close it.

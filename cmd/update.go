@@ -2,14 +2,11 @@ package cmd
 
 import (
 	"fmt"
-	"os/exec"
-	"regexp"
 	"time"
 
 	"github.com/CircleCI-Public/circleci-cli/settings"
 	"github.com/CircleCI-Public/circleci-cli/update"
 	"github.com/CircleCI-Public/circleci-cli/version"
-	"github.com/pkg/errors"
 
 	"github.com/spf13/cobra"
 
@@ -76,7 +73,7 @@ func newUpdateCommand(config *settings.Config) *cobra.Command {
 	update.AddCommand(&cobra.Command{
 		Use:    "build-agent",
 		Hidden: true,
-		Short:  "Update the build agent to the latest version",
+		Short:  "This command has no effect, and is kept for backwards compatibility",
 		PersistentPreRun: func(_ *cobra.Command, _ []string) {
 			opts.cfg.SkipUpdateCheck = true
 		},
@@ -84,58 +81,13 @@ func newUpdateCommand(config *settings.Config) *cobra.Command {
 			opts.args = args
 		},
 		RunE: func(_ *cobra.Command, _ []string) error {
-			return updateBuildAgent()
+			return nil
 		},
 	})
 
 	update.PersistentFlags().BoolVar(&opts.dryRun, "check", false, "Check if there are any updates available without installing")
 
 	return update
-}
-
-var picardRepo = "circleci/picard"
-
-func updateBuildAgent() error {
-	latestSha256, err := findLatestPicardSha()
-
-	if err != nil {
-		return err
-	}
-
-	fmt.Printf("Latest build agent is version %s\n", latestSha256)
-
-	return nil
-}
-
-// Still depends on a function in cmd/build.go
-func findLatestPicardSha() (string, error) {
-
-	if err := ensureDockerIsAvailable(); err != nil {
-		return "", err
-	}
-
-	outputBytes, err := exec.Command("docker", "pull", picardRepo).CombinedOutput() // #nosec
-
-	if err != nil {
-		return "", errors.Wrap(err, "failed to pull latest docker image")
-	}
-
-	output := string(outputBytes)
-	sha256 := regexp.MustCompile("(?m)sha256:[0-9a-f]+")
-	latest := sha256.FindString(output)
-
-	if latest == "" {
-		return "", fmt.Errorf("failed to parse sha256 from docker pull output")
-	}
-
-	// This function still lives in cmd/build.go
-	err = storeBuildAgentSha(latest)
-
-	if err != nil {
-		return "", err
-	}
-
-	return latest, nil
 }
 
 func updateCLI(opts updateCommandOptions) error {
@@ -145,7 +97,7 @@ func updateCLI(opts updateCommandOptions) error {
 	spr.Suffix = " Checking for updates..."
 	spr.Start()
 
-	check, err := update.CheckForUpdates(opts.cfg.GitHubAPI, slug, version.Version, PackageManager)
+	check, err := update.CheckForUpdates(opts.cfg.GitHubAPI, slug, version.Version, version.PackageManager())
 	spr.Stop()
 
 	if err != nil {
